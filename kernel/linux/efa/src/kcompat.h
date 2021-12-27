@@ -186,4 +186,58 @@ typedef u32 port_t;
 typedef u8 port_t;
 #endif
 
+#if defined(HAVE_MR_DMABUF) && !defined(HAVE_IB_UMEM_DMABUF_PINNED)
+#include <linux/dma-buf.h>
+#include <linux/dma-resv.h>
+
+static inline void
+ib_umem_dmabuf_unsupported_move_notify(struct dma_buf_attachment *attach)
+{
+	struct ib_umem_dmabuf *umem_dmabuf = attach->importer_priv;
+
+	ibdev_warn_ratelimited(umem_dmabuf->umem.ibdev,
+			       "Invalidate callback should not be called when memory is pinned\n");
+}
+
+static struct dma_buf_attach_ops ib_umem_dmabuf_attach_pinned_ops = {
+	.allow_peer2peer = true,
+	.move_notify = ib_umem_dmabuf_unsupported_move_notify,
+};
+
+static inline
+struct ib_umem_dmabuf *ib_umem_dmabuf_get_pinned(struct ib_device *device,
+						 unsigned long offset,
+						 size_t size, int fd,
+						 int access)
+{
+	struct ib_umem_dmabuf *umem_dmabuf;
+	int err;
+
+	umem_dmabuf = ib_umem_dmabuf_get(device, offset, size, fd, access,
+					 &ib_umem_dmabuf_attach_pinned_ops);
+	if (IS_ERR(umem_dmabuf))
+		return umem_dmabuf;
+
+	dma_resv_lock(umem_dmabuf->attach->dmabuf->resv, NULL);
+	err = dma_buf_pin(umem_dmabuf->attach);
+	if (err)
+		goto err_release;
+	umem_dmabuf->pinned = 1;
+
+	err = ib_umem_dmabuf_map_pages(umem_dmabuf);
+	if (err)
+		goto err_unpin;
+	dma_resv_unlock(umem_dmabuf->attach->dmabuf->resv);
+
+	return umem_dmabuf;
+
+err_unpin:
+	dma_buf_unpin(umem_dmabuf->attach);
+err_release:
+	dma_resv_unlock(umem_dmabuf->attach->dmabuf->resv);
+	ib_umem_release(&umem_dmabuf->umem);
+	return ERR_PTR(err);
+}
+#endif /* !HAVE_IB_UMEM_DMABUF_PINNED */
+
 #endif /* _KCOMPAT_H_ */
